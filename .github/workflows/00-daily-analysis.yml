@@ -451,6 +451,7 @@ jobs:
           echo "  Discord: $([ -n "$DISCORD_WEBHOOK_URL" ] && echo '✅ 已配置' || echo '⚪ 未配置')"
           echo "  AstrBot: $([ -n "$ASTRBOT_URL" ] && echo '✅ 已配置' || echo '⚪ 未配置')"
           echo "  Slack: $(([ -n "$SLACK_WEBHOOK_URL" ] || ([ -n "$SLACK_BOT_TOKEN" ] && [ -n "$SLACK_CHANNEL_ID" ])) && echo '✅ 已配置' || echo '⚪ 未配置')"
+          echo "  自定义Webhook: $([ -z "$CUSTOM_WEBHOOK_URLS" ] && echo '⚪ 未配置' || echo "$CUSTOM_WEBHOOK_URLS" | grep -qi 'dingding' && echo '✅ 已配置（钉钉）' || echo '✅ 已配置')"
           echo "=========================================="
           echo ""
           
