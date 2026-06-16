@@ -157,6 +157,7 @@ class CustomWebhookSender:
         body = json.dumps(payload, ensure_ascii=False).encode('utf-8')
         response = requests.post(url, data=body, headers=headers, timeout=timeout, verify=self._webhook_verify_ssl)
         if response.status_code == 200:
+            logger.info(f"自定义 Webhook 推送成功, 响应: {response.text[:200]}")
             return True
         logger.error(f"自定义 Webhook 推送失败: HTTP {response.status_code}")
         logger.debug(f"响应内容: {response.text[:200]}")
@@ -378,6 +379,7 @@ class CustomWebhookSender:
 
             if self._post_custom_webhook(url, payload, timeout=30):
                 ok += 1
+                logger.info(f"钉钉分批发送成功: 第 {idx+1}/{total} 批")
             else:
                 logger.error(f"钉钉分批发送失败: 第 {idx+1}/{total} 批")
 
