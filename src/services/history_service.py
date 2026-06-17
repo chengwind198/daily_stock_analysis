@@ -834,6 +834,153 @@ class HistoryService:
             logger.error(f"Failed to rebuild AnalysisResult: {e}", exc_info=True)
             return None
 
+    @staticmethod
+    def _build_data_source_summary_lines(record) -> List[str]:
+        """
+        Build data source and search engine summary lines from the record's
+        context_snapshot diagnostics, for display in the Markdown report.
+        """
+        lines: List[str] = []
+
+        # Parse context_snapshot
+        context_snapshot: Dict[str, Any] = {}
+        raw_snapshot = getattr(record, "context_snapshot", None)
+        if raw_snapshot:
+            try:
+                context_snapshot = json.loads(raw_snapshot) if isinstance(raw_snapshot, str) else raw_snapshot
+            except (json.JSONDecodeError, TypeError):
+                pass
+
+        diagnostics = context_snapshot.get("diagnostics", {}) if isinstance(context_snapshot, dict) else {}
+        provider_runs: List[Dict[str, Any]] = diagnostics.get("provider_runs", []) if isinstance(diagnostics, dict) else []
+
+        # Data source type labels (ordered by importance)
+        data_source_types: List[Tuple[str, str]] = [
+            ("realtime_quote", "实时行情"),
+            ("daily_data", "日线K线"),
+            ("chip", "筹码结构"),
+            ("belong_boards", "所属板块"),
+        ]
+
+        # Separate runs by category
+        data_source_runs_by_type: Dict[str, List[Dict[str, Any]]] = {}
+        search_runs_by_provider: Dict[str, List[Dict[str, Any]]] = {}
+
+        for run in provider_runs:
+            if not isinstance(run, dict):
+                continue
+            data_type = str(run.get("data_type", "")).strip()
+            provider = str(run.get("provider", "unknown")).strip()
+
+            if data_type == "news_search":
+                search_runs_by_provider.setdefault(provider, []).append(run)
+            elif data_type in dict(data_source_types):
+                data_source_runs_by_type.setdefault(data_type, []).append(run)
+
+        # ---------- 【数据源】 section ----------
+        lines.append("### 📡 数据源")
+        lines.append("")
+
+        for data_type, label in data_source_types:
+            runs = data_source_runs_by_type.get(data_type, [])
+            if not runs:
+                # Check analysis_context_pack_overview blocks as fallback
+                overview = context_snapshot.get("analysis_context_pack_overview", {}) if isinstance(context_snapshot, dict) else {}
+                blocks = overview.get("blocks", []) if isinstance(overview, dict) else []
+                block_found = False
+                if isinstance(blocks, list):
+                    for block in blocks:
+                        if isinstance(block, dict) and block.get("key") == data_type:
+                            block_status = block.get("status", "")
+                            if block_status == "available":
+                                lines.append(f"- **{label}**：已配置，数据已获取")
+                            elif block_status == "missing":
+                                reasons = block.get("missing_reasons", [])
+                                reason = reasons[0] if reasons else "数据不可用"
+                                if len(str(reason)) > 200:
+                                    reason = str(reason)[:197] + "..."
+                                lines.append(f"- **{label}**：已配置，获取失败({reason})")
+                            else:
+                                lines.append(f"- **{label}**：{block_status}")
+                            block_found = True
+                            break
+                if not block_found:
+                    lines.append(f"- **{label}**：未配置")
+                continue
+
+            successes = [r for r in runs if r.get("success") is True]
+            failures = [r for r in runs if r.get("success") is False]
+
+            if successes:
+                best = successes[-1]
+                count = best.get("record_count")
+                provider = best.get("provider", "")
+                count_str = f"，数据{count}条" if count is not None else ""
+                lines.append(f"- **{label}**（{provider}）：已配置{count_str}")
+            elif failures:
+                last = failures[-1]
+                error = str(last.get("error_message_sanitized", "") or last.get("error_type", "未知错误"))
+                if len(error) > 200:
+                    error = error[:197] + "..."
+                provider = last.get("provider", "")
+                lines.append(f"- **{label}**（{provider}）：已配置，获取失败({error})")
+            else:
+                lines.append(f"- **{label}**：已配置，状态未知")
+
+        lines.append("")
+
+        # ---------- 【搜索引擎】 section ----------
+        lines.append("### 🔍 搜索引擎")
+        lines.append("")
+
+        # Known search engine providers (in priority order)
+        known_search_providers = [
+            "Bocha", "Tavily", "Anspire", "Brave", "SerpAPI", "MiniMax", "SearXNG",
+        ]
+
+        has_any_search_run = bool(search_runs_by_provider)
+
+        if not has_any_search_run:
+            # Check if search was performed at all via other indicators
+            search_performed = False
+            raw_result_raw = getattr(record, "raw_result", None)
+            if raw_result_raw:
+                try:
+                    raw_result = json.loads(raw_result_raw) if isinstance(raw_result_raw, str) else raw_result_raw
+                    if isinstance(raw_result, dict):
+                        search_performed = raw_result.get("search_performed", False)
+                except (json.JSONDecodeError, TypeError):
+                    pass
+
+            if search_performed:
+                lines.append("- 搜索引擎已配置，数据已获取")
+            else:
+                lines.append("- 未配置搜索引擎")
+        else:
+            for provider in known_search_providers:
+                runs = search_runs_by_provider.get(provider, [])
+                if not runs:
+                    # Provider not attempted - may not be configured
+                    continue
+
+                successes = [r for r in runs if r.get("success") is True]
+                failures = [r for r in runs if r.get("success") is False]
+
+                if successes:
+                    best = successes[-1]
+                    count = best.get("record_count")
+                    count_str = f"，数据{count}条" if count is not None else ""
+                    lines.append(f"- **{provider}**：已配置{count_str}")
+                elif failures:
+                    last = failures[-1]
+                    error = str(last.get("error_message_sanitized", "") or last.get("error_type", "未知错误"))
+                    if len(error) > 200:
+                        error = error[:197] + "..."
+                    lines.append(f"- **{provider}**：已配置，获取失败({error})")
+
+        lines.append("")
+        return lines
+
     def _generate_single_stock_markdown(
         self,
         result: AnalysisResult,
@@ -882,6 +1029,9 @@ class HistoryService:
             "---",
             "",
         ]
+
+        # ========== 数据源与搜索引擎状态 ==========
+        report_lines.extend(self._build_data_source_summary_lines(record))
 
         # ========== 舆情与基本面概览（放在最前面）==========
         intel = dashboard.get('intelligence', {}) if dashboard else {}
