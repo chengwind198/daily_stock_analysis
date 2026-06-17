@@ -316,6 +316,115 @@ class NotificationService(
         self._history_compare_cache[cache_key] = history_by_code
         return {"history_by_code": history_by_code}
 
+    @staticmethod
+    def _build_data_source_summary_lines(results: List[Any]) -> List[str]:
+        """
+        Build data source and search engine summary lines from AnalysisResult
+        diagnostic_context_snapshot, for display in notification reports.
+        """
+        lines: List[str] = []
+
+        # Extract diagnostics from the first result that has it
+        diagnostics: Dict[str, Any] = {}
+        for result in results or []:
+            snapshot = getattr(result, "diagnostic_context_snapshot", None)
+            if isinstance(snapshot, dict):
+                diagnostics = snapshot.get("diagnostics", {})
+                if isinstance(diagnostics, dict) and diagnostics:
+                    break
+
+        provider_runs: List[Dict[str, Any]] = diagnostics.get("provider_runs", []) if isinstance(diagnostics, dict) else []
+
+        # Data source type labels (ordered by importance)
+        data_source_types: List[Tuple[str, str]] = [
+            ("realtime_quote", "实时行情"),
+            ("daily_data", "日线K线"),
+            ("chip", "筹码结构"),
+            ("belong_boards", "所属板块"),
+        ]
+
+        # Separate runs by category
+        data_source_runs_by_type: Dict[str, List[Dict[str, Any]]] = {}
+        search_runs_by_provider: Dict[str, List[Dict[str, Any]]] = {}
+
+        for run in provider_runs:
+            if not isinstance(run, dict):
+                continue
+            data_type = str(run.get("data_type", "")).strip()
+            provider = str(run.get("provider", "unknown")).strip()
+
+            if data_type == "news_search":
+                search_runs_by_provider.setdefault(provider, []).append(run)
+            elif data_type in dict(data_source_types):
+                data_source_runs_by_type.setdefault(data_type, []).append(run)
+
+        # ---------- 【数据源】 section ----------
+        lines.append("### 📡 数据源")
+        lines.append("")
+
+        for data_type, label in data_source_types:
+            runs = data_source_runs_by_type.get(data_type, [])
+            if not runs:
+                lines.append(f"- **{label}**：未配置")
+                continue
+
+            successes = [r for r in runs if r.get("success") is True]
+            failures = [r for r in runs if r.get("success") is False]
+
+            if successes:
+                best = successes[-1]
+                count = best.get("record_count")
+                provider = best.get("provider", "")
+                count_str = f"，数据{count}条" if count is not None else ""
+                lines.append(f"- **{label}**（{provider}）：已配置{count_str}")
+            elif failures:
+                last = failures[-1]
+                error = str(last.get("error_message_sanitized", "") or last.get("error_type", "未知错误"))
+                if len(error) > 200:
+                    error = error[:197] + "..."
+                provider = last.get("provider", "")
+                lines.append(f"- **{label}**（{provider}）：已配置，获取失败({error})")
+            else:
+                lines.append(f"- **{label}**：已配置，状态未知")
+
+        lines.append("")
+
+        # ---------- 【搜索引擎】 section ----------
+        lines.append("### 🔍 搜索引擎")
+        lines.append("")
+
+        known_search_providers = [
+            "Bocha", "Tavily", "Anspire", "Brave", "SerpAPI", "MiniMax", "SearXNG",
+        ]
+
+        has_any_search_run = bool(search_runs_by_provider)
+
+        if not has_any_search_run:
+            lines.append("- 未配置搜索引擎")
+        else:
+            for provider in known_search_providers:
+                runs = search_runs_by_provider.get(provider, [])
+                if not runs:
+                    continue
+
+                successes = [r for r in runs if r.get("success") is True]
+                failures = [r for r in runs if r.get("success") is False]
+
+                if successes:
+                    best = successes[-1]
+                    count = best.get("record_count")
+                    count_str = f"，数据{count}条" if count is not None else ""
+                    lines.append(f"- **{provider}**：已配置{count_str}")
+                elif failures:
+                    last = failures[-1]
+                    error = str(last.get("error_message_sanitized", "") or last.get("error_type", "未知错误"))
+                    if len(error) > 200:
+                        error = error[:197] + "..."
+                    lines.append(f"- **{provider}**：已配置，获取失败({error})")
+
+        lines.append("")
+        return lines
+
     def generate_aggregate_report(
         self,
         results: List[AnalysisResult],
@@ -1077,6 +1186,9 @@ class NotificationService(
         ]
         self._append_market_status_line(report_lines, results, report_language)
 
+        # ========== 数据源与搜索引擎状态 ==========
+        report_lines.extend(self._build_data_source_summary_lines(results))
+
         # === 新增：分析结果摘要 (Issue #112) ===
         if results:
             report_lines.extend([
@@ -1620,6 +1732,10 @@ class NotificationService(
             f"> {len(results)} {labels['stock_unit_compact']} | 🟢{buy_count} 🟡{hold_count} 🔴{sell_count}",
         ]
         self._append_market_status_line(lines, results, report_language)
+
+        # ========== 数据源与搜索引擎状态 ==========
+        lines.extend(self._build_data_source_summary_lines(results))
+
         for r in sorted_results:
             _, emoji, _ = self._get_signal_level(r)
             name = self._get_display_name(r, report_language)
@@ -1668,6 +1784,9 @@ class NotificationService(
             f"> {report_date} | {labels['score_label']}: **{result.sentiment_score}** | {localize_trend_prediction(result.trend_prediction, report_language)}",
             "",
         ]
+
+        # ========== 数据源与搜索引擎状态 ==========
+        lines.extend(self._build_data_source_summary_lines([result]))
 
         excerpt = self._public_phase_pack_excerpt(result, report_language)
         if excerpt:
