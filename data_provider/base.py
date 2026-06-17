@@ -1337,6 +1337,14 @@ class DataFetcherManager:
         for attempt, fetcher in enumerate(fetchers, start=1):
             if not self._is_daily_source_available(fetcher, market):
                 errors.append(self._daily_source_unavailable_error(fetcher))
+                record_provider_run(
+                    data_type="daily_data",
+                    provider=fetcher.name,
+                    operation="get_daily_data",
+                    success=False,
+                    error_type="unavailable",
+                    error_message="fetcher not available for this market",
+                )
                 continue
             attempt_start = time.time()
             fallback_to = fetchers[attempt].name if attempt < total_fetchers else None
@@ -1366,6 +1374,17 @@ class DataFetcherManager:
                         latency_ms=duration_ms,
                         record_count=len(df),
                     )
+                    # Record skipped fetchers after this one in the chain
+                    for skipped in range(attempt, total_fetchers):
+                        skipped_fetcher = fetchers[skipped]
+                        record_provider_run(
+                            data_type="daily_data",
+                            provider=skipped_fetcher.name,
+                            operation="get_daily_data",
+                            success=False,
+                            error_type="skipped",
+                            error_message="higher-priority provider succeeded",
+                        )
                     elapsed = time.time() - request_start
                     logger.info(
                         f"[数据源完成] {stock_code} 使用 [{fetcher.name}] 获取成功: "

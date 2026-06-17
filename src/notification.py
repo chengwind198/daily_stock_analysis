@@ -428,14 +428,18 @@ class NotificationService(
             for run in runs:
                 provider = run.get("provider", "?")
                 success = run.get("success")
+                error_type = run.get("error_type", "")
                 if success is True:
                     count = run.get("record_count")
                     count_str = f"({count}条)" if count is not None else ""
                     parts.append(f"{provider} ✅{count_str}")
                     final_success = True
                     final_record_count = count
+                elif success is False and error_type == "skipped":
+                    parts.append(f"{provider} ⏭️")
+                elif success is False and error_type == "unavailable":
+                    parts.append(f"{provider} ⛔")
                 elif success is False:
-                    error_type = run.get("error_type", "")
                     err_str = f"({error_type})" if error_type else ""
                     parts.append(f"{provider} ❌{err_str}")
                 else:
