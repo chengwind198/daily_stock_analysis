@@ -326,14 +326,27 @@ class NotificationService(
 
         # Extract diagnostics from the first result that has it
         diagnostics: Dict[str, Any] = {}
+        found_snapshot = False
         for result in results or []:
             snapshot = getattr(result, "diagnostic_context_snapshot", None)
             if isinstance(snapshot, dict):
+                found_snapshot = True
                 diagnostics = snapshot.get("diagnostics", {})
                 if isinstance(diagnostics, dict) and diagnostics:
+                    logger.info(
+                        "[data_source_summary] found diagnostics in result: %s keys",
+                        list(diagnostics.keys())[:10],
+                    )
                     break
 
+        if not found_snapshot:
+            logger.info(
+                "[data_source_summary] no diagnostic_context_snapshot found in %d results",
+                len(results or []),
+            )
+
         provider_runs: List[Dict[str, Any]] = diagnostics.get("provider_runs", []) if isinstance(diagnostics, dict) else []
+        logger.info("[data_source_summary] provider_runs count: %d", len(provider_runs))
 
         # Data source type labels (ordered by importance)
         data_source_types: List[Tuple[str, str]] = [
