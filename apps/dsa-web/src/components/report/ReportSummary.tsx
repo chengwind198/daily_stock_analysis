@@ -1,6 +1,7 @@
 import React from 'react';
 import type { AnalysisResult, AnalysisReport } from '../../types/analysis';
 import { ReportOverview } from './ReportOverview';
+import { ReportDataSourceSummary } from './ReportDataSourceSummary';
 import { ReportStrategy } from './ReportStrategy';
 import { ReportNews } from './ReportNews';
 import { ReportDetails } from './ReportDetails';
@@ -66,6 +67,12 @@ export const ReportSummary: React.FC<ReportSummaryProps> = ({
         details={details}
         isHistory={isHistory}
         watchlist={watchlist}
+      />
+
+      {/* 数据源与搜索引擎状态 */}
+      <ReportDataSourceSummary
+        contextSnapshot={details?.contextSnapshot as Record<string, unknown> | null | undefined}
+        language={reportLanguage}
       />
 
       {/* 策略点位区 */}
