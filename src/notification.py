@@ -327,8 +327,12 @@ class NotificationService(
         """
         lines: List[str] = []
 
-        # Merge provider_runs from ALL results (each stock may have different runs)
+        # Merge provider_runs from ALL results (each stock may have different runs).
+        # Data-source runs are taken from the first result only (all stocks share the same
+        # data-source config / fallback chain); news_search runs are merged across all stocks
+        # because different stocks may hit different search providers.
         all_provider_runs: List[Dict[str, Any]] = []
+        news_search_runs: List[Dict[str, Any]] = []
         found_any_snapshot = False
         for result in results or []:
             snapshot = getattr(result, "diagnostic_context_snapshot", None)
@@ -339,8 +343,18 @@ class NotificationService(
             if not isinstance(diagnostics, dict):
                 continue
             runs = diagnostics.get("provider_runs", [])
-            if isinstance(runs, list):
-                all_provider_runs.extend(runs)
+            if not isinstance(runs, list):
+                continue
+            # Separate data-source vs news_search runs
+            ds_runs = []
+            for r in runs:
+                if isinstance(r, dict) and str(r.get("data_type", "")).strip() == "news_search":
+                    news_search_runs.append(r)
+                elif isinstance(r, dict):
+                    ds_runs.append(r)
+            # Only keep data-source runs from the first result that has any
+            if not all_provider_runs and ds_runs:
+                all_provider_runs = ds_runs
 
         if not found_any_snapshot:
             logger.info(
@@ -349,9 +363,8 @@ class NotificationService(
             )
 
         logger.info(
-            "[data_source_summary] total provider_runs across %d results: %d",
-            len(results or []),
-            len(all_provider_runs),
+            "[data_source_summary] total provider_runs: ds=%d news_search=%d",
+            len(all_provider_runs), len(news_search_runs),
         )
 
         # Data source type labels (ordered by importance)
@@ -362,36 +375,41 @@ class NotificationService(
             ("belong_boards", "所属板块"),
         ]
 
-        # Separate runs by category (deduplicate by provider within each data_type)
+        # Separate runs by category
         data_source_runs_by_type: Dict[str, List[Dict[str, Any]]] = {}
         search_runs_by_provider: Dict[str, List[Dict[str, Any]]] = {}
-        seen_keys: Set[Tuple[str, str]] = set()
+        seen_search_keys: Set[Tuple[str, str]] = set()
 
+        # Process data-source runs (from the first stock only — all stocks share the same
+        # data-source config / fallback chain, so one stock is representative)
         for run in all_provider_runs:
             if not isinstance(run, dict):
                 continue
             data_type = str(run.get("data_type", "")).strip()
-            provider = str(run.get("provider", "unknown")).strip()
+            if data_type in dict(data_source_types):
+                data_source_runs_by_type.setdefault(data_type, []).append(run)
 
-            if data_type == "news_search":
-                # Deduplicate by provider (keep the best result)
-                key = ("news_search", provider)
-                existing = search_runs_by_provider.get(provider, [])
-                if key not in seen_keys:
-                    seen_keys.add(key)
-                    search_runs_by_provider.setdefault(provider, []).append(run)
-                else:
-                    # Replace if this run is more successful
-                    for i, existing_run in enumerate(existing):
-                        if run.get("success") and not existing_run.get("success"):
+        # Process news_search runs (merged from ALL stocks — different stocks may use
+        # different search providers, so we merge and deduplicate by provider)
+        for run in news_search_runs:
+            if not isinstance(run, dict):
+                continue
+            provider = str(run.get("provider", "unknown")).strip()
+            key = ("news_search", provider)
+            existing = search_runs_by_provider.get(provider, [])
+            if key not in seen_search_keys:
+                seen_search_keys.add(key)
+                search_runs_by_provider.setdefault(provider, []).append(run)
+            else:
+                # Replace if this run is more successful
+                for i, existing_run in enumerate(existing):
+                    if run.get("success") and not existing_run.get("success"):
+                        existing[i] = run
+                        break
+                    elif run.get("success") and existing_run.get("success"):
+                        if (run.get("record_count") or 0) > (existing_run.get("record_count") or 0):
                             existing[i] = run
                             break
-                        elif run.get("success") and existing_run.get("success"):
-                            if (run.get("record_count") or 0) > (existing_run.get("record_count") or 0):
-                                existing[i] = run
-                                break
-            elif data_type in dict(data_source_types):
-                data_source_runs_by_type.setdefault(data_type, []).append(run)
 
         # ---------- 【数据源】 section ----------
         lines.append("### 📡 数据源")
