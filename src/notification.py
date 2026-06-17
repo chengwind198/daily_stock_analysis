@@ -20,7 +20,7 @@ import logging
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import List, Dict, Any, Optional, Tuple, TYPE_CHECKING
+from typing import List, Dict, Any, Optional, Set, Tuple, TYPE_CHECKING
 from enum import Enum
 
 from src.config import Config, get_config
@@ -321,32 +321,38 @@ class NotificationService(
         """
         Build data source and search engine summary lines from AnalysisResult
         diagnostic_context_snapshot, for display in notification reports.
+
+        Merges provider_runs from ALL results to capture the complete picture
+        across all stocks analysed in a batch.
         """
         lines: List[str] = []
 
-        # Extract diagnostics from the first result that has it
-        diagnostics: Dict[str, Any] = {}
-        found_snapshot = False
+        # Merge provider_runs from ALL results (each stock may have different runs)
+        all_provider_runs: List[Dict[str, Any]] = []
+        found_any_snapshot = False
         for result in results or []:
             snapshot = getattr(result, "diagnostic_context_snapshot", None)
-            if isinstance(snapshot, dict):
-                found_snapshot = True
-                diagnostics = snapshot.get("diagnostics", {})
-                if isinstance(diagnostics, dict) and diagnostics:
-                    logger.info(
-                        "[data_source_summary] found diagnostics in result: %s keys",
-                        list(diagnostics.keys())[:10],
-                    )
-                    break
+            if not isinstance(snapshot, dict):
+                continue
+            found_any_snapshot = True
+            diagnostics = snapshot.get("diagnostics", {})
+            if not isinstance(diagnostics, dict):
+                continue
+            runs = diagnostics.get("provider_runs", [])
+            if isinstance(runs, list):
+                all_provider_runs.extend(runs)
 
-        if not found_snapshot:
+        if not found_any_snapshot:
             logger.info(
                 "[data_source_summary] no diagnostic_context_snapshot found in %d results",
                 len(results or []),
             )
 
-        provider_runs: List[Dict[str, Any]] = diagnostics.get("provider_runs", []) if isinstance(diagnostics, dict) else []
-        logger.info("[data_source_summary] provider_runs count: %d", len(provider_runs))
+        logger.info(
+            "[data_source_summary] total provider_runs across %d results: %d",
+            len(results or []),
+            len(all_provider_runs),
+        )
 
         # Data source type labels (ordered by importance)
         data_source_types: List[Tuple[str, str]] = [
@@ -356,18 +362,34 @@ class NotificationService(
             ("belong_boards", "所属板块"),
         ]
 
-        # Separate runs by category
+        # Separate runs by category (deduplicate by provider within each data_type)
         data_source_runs_by_type: Dict[str, List[Dict[str, Any]]] = {}
         search_runs_by_provider: Dict[str, List[Dict[str, Any]]] = {}
+        seen_keys: Set[Tuple[str, str]] = set()
 
-        for run in provider_runs:
+        for run in all_provider_runs:
             if not isinstance(run, dict):
                 continue
             data_type = str(run.get("data_type", "")).strip()
             provider = str(run.get("provider", "unknown")).strip()
 
             if data_type == "news_search":
-                search_runs_by_provider.setdefault(provider, []).append(run)
+                # Deduplicate by provider (keep the best result)
+                key = ("news_search", provider)
+                existing = search_runs_by_provider.get(provider, [])
+                if key not in seen_keys:
+                    seen_keys.add(key)
+                    search_runs_by_provider.setdefault(provider, []).append(run)
+                else:
+                    # Replace if this run is more successful
+                    for i, existing_run in enumerate(existing):
+                        if run.get("success") and not existing_run.get("success"):
+                            existing[i] = run
+                            break
+                        elif run.get("success") and existing_run.get("success"):
+                            if (run.get("record_count") or 0) > (existing_run.get("record_count") or 0):
+                                existing[i] = run
+                                break
             elif data_type in dict(data_source_types):
                 data_source_runs_by_type.setdefault(data_type, []).append(run)
 
@@ -381,24 +403,31 @@ class NotificationService(
                 lines.append(f"- **{label}**：未配置")
                 continue
 
-            successes = [r for r in runs if r.get("success") is True]
-            failures = [r for r in runs if r.get("success") is False]
+            # Build a chain description showing the fallback flow
+            parts: List[str] = []
+            final_success = False
+            final_record_count: Optional[int] = None
+            for run in runs:
+                provider = run.get("provider", "?")
+                success = run.get("success")
+                if success is True:
+                    count = run.get("record_count")
+                    count_str = f"({count}条)" if count is not None else ""
+                    parts.append(f"{provider} ✅{count_str}")
+                    final_success = True
+                    final_record_count = count
+                elif success is False:
+                    error_type = run.get("error_type", "")
+                    err_str = f"({error_type})" if error_type else ""
+                    parts.append(f"{provider} ❌{err_str}")
+                else:
+                    parts.append(f"{provider} ❓")
 
-            if successes:
-                best = successes[-1]
-                count = best.get("record_count")
-                provider = best.get("provider", "")
-                count_str = f"，数据{count}条" if count is not None else ""
-                lines.append(f"- **{label}**（{provider}）：已配置{count_str}")
-            elif failures:
-                last = failures[-1]
-                error = str(last.get("error_message_sanitized", "") or last.get("error_type", "未知错误"))
-                if len(error) > 200:
-                    error = error[:197] + "..."
-                provider = last.get("provider", "")
-                lines.append(f"- **{label}**（{provider}）：已配置，获取失败({error})")
+            if final_success:
+                count_str = f"，数据{final_record_count}条" if final_record_count is not None else ""
+                lines.append(f"- **{label}**：{' → '.join(parts)} 已配置{count_str}")
             else:
-                lines.append(f"- **{label}**：已配置，状态未知")
+                lines.append(f"- **{label}**：{' → '.join(parts)} 已配置，获取失败")
 
         lines.append("")
 
@@ -1199,9 +1228,6 @@ class NotificationService(
         ]
         self._append_market_status_line(report_lines, results, report_language)
 
-        # ========== 数据源与搜索引擎状态 ==========
-        report_lines.extend(self._build_data_source_summary_lines(results))
-
         # === 新增：分析结果摘要 (Issue #112) ===
         if results:
             report_lines.extend([
@@ -1616,6 +1642,9 @@ class NotificationService(
                 lines.append("---")
                 lines.append("")
         
+        # ========== 数据源与搜索引擎状态 ==========
+        lines.extend(self._build_data_source_summary_lines(results))
+
         # 底部
         lines.append(f"*{labels['report_time_label']}: {datetime.now().strftime('%H:%M')}*")
         models = self._collect_models_used(results)
@@ -1746,9 +1775,6 @@ class NotificationService(
         ]
         self._append_market_status_line(lines, results, report_language)
 
-        # ========== 数据源与搜索引擎状态 ==========
-        lines.extend(self._build_data_source_summary_lines(results))
-
         for r in sorted_results:
             _, emoji, _ = self._get_signal_level(r)
             name = self._get_display_name(r, report_language)
@@ -1761,6 +1787,10 @@ class NotificationService(
                 f"{labels['score_label']} {r.sentiment_score} | {one}"
             )
         lines.append("")
+
+        # ========== 数据源与搜索引擎状态 ==========
+        lines.extend(self._build_data_source_summary_lines(results))
+
         lines.append(f"*{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}*")
         models = self._collect_models_used(results)
         if models:
@@ -1797,9 +1827,6 @@ class NotificationService(
             f"> {report_date} | {labels['score_label']}: **{result.sentiment_score}** | {localize_trend_prediction(result.trend_prediction, report_language)}",
             "",
         ]
-
-        # ========== 数据源与搜索引擎状态 ==========
-        lines.extend(self._build_data_source_summary_lines([result]))
 
         excerpt = self._public_phase_pack_excerpt(result, report_language)
         if excerpt:
@@ -1885,6 +1912,9 @@ class NotificationService(
 
         # 财务摘要 / 股东回报 / 关联板块（数据缺失时自动隐藏对应小节）
         self._append_fundamental_blocks(lines, result)
+
+        # ========== 数据源与搜索引擎状态 ==========
+        lines.extend(self._build_data_source_summary_lines([result]))
 
         lines.append("---")
         if self._should_show_llm_model():
