@@ -1225,6 +1225,10 @@ class NotificationService(
                 },
             )
             if out:
+                # Append data source / search engine summary at the end
+                ds_lines = self._build_data_source_summary_lines(results)
+                if ds_lines:
+                    out = out.rstrip("\n") + "\n\n" + "\n".join(ds_lines)
                 return out
 
         if report_date is None:
@@ -1495,6 +1499,8 @@ class NotificationService(
                 ])
         
         # 底部（去除免责声明）
+        # ========== 数据源与搜索引擎状态 ==========
+        report_lines.extend(self._build_data_source_summary_lines(results))
         report_lines.extend([
             "",
             f"*{labels['generated_at_label']}：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}*",
@@ -1530,6 +1536,10 @@ class NotificationService(
                 extra_context={"report_language": report_language},
             )
             if out:
+                # Append data source / search engine summary at the end
+                ds_lines = self._build_data_source_summary_lines(results)
+                if ds_lines:
+                    out = out.rstrip("\n") + "\n\n" + "\n".join(ds_lines)
                 return out
 
         report_date = datetime.now().strftime('%Y-%m-%d')
@@ -1778,6 +1788,10 @@ class NotificationService(
                 extra_context={"report_language": report_language},
             )
             if out:
+                # Append data source / search engine summary at the end
+                ds_lines = self._build_data_source_summary_lines(results)
+                if ds_lines:
+                    out = out.rstrip("\n") + "\n\n" + "\n".join(ds_lines)
                 return out
         # Fallback: brief summary from dashboard report
         if not results:
