@@ -4098,36 +4098,19 @@ class SearchService:
                 request_days,
             )
 
-            started_at = time.monotonic()
-            try:
-                record_provider_run_started(
-                    data_type="news_search",
-                    provider=provider.name,
-                    operation=f"search_comprehensive_intel.{dim['name']}",
+            if isinstance(provider, TavilySearchProvider) and dim.get('tavily_topic'):
+                response = provider.search(
+                    dim['query'],
+                    max_results=provider_max_results,
+                    days=request_days,
+                    topic=dim['tavily_topic'],
                 )
-                if isinstance(provider, TavilySearchProvider) and dim.get('tavily_topic'):
-                    response = provider.search(
-                        dim['query'],
-                        max_results=provider_max_results,
-                        days=request_days,
-                        topic=dim['tavily_topic'],
-                    )
-                else:
-                    response = provider.search(
-                        dim['query'],
-                        max_results=provider_max_results,
-                        days=request_days,
-                    )
-            except Exception as exc:
-                self._record_news_search_run(
-                    provider=provider.name,
-                    operation=f"search_comprehensive_intel.{dim['name']}",
-                    success=False,
-                    latency_ms=self._elapsed_ms(started_at),
-                    error_type=type(exc).__name__,
-                    error_message=exc,
+            else:
+                response = provider.search(
+                    dim['query'],
+                    max_results=provider_max_results,
+                    days=request_days,
                 )
-                continue
             if dim['strict_freshness']:
                 filtered_response = self._filter_news_response(
                     response,
@@ -4166,19 +4149,6 @@ class SearchService:
             )
             results[dim['name']] = filtered_response
             search_count += 1
-
-            admitted_count = len(filtered_response.results or [])
-            self._record_news_search_run(
-                provider=provider.name,
-                operation=f"search_comprehensive_intel.{dim['name']}",
-                success=bool(response.success and admitted_count),
-                latency_ms=self._elapsed_ms(started_at),
-                record_count=admitted_count,
-                error_type=None if admitted_count else "NoUsableNews",
-                error_message=None if admitted_count else (
-                    response.error_message or "搜索无有效结果"
-                ),
-            )
             
             if response.success:
                 logger.info(

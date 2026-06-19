@@ -20,7 +20,7 @@ import logging
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import List, Dict, Any, Optional, Set, Tuple, TYPE_CHECKING
+from typing import List, Dict, Any, Optional, Tuple, TYPE_CHECKING
 from enum import Enum
 
 from src.config import Config, get_config
@@ -315,179 +315,6 @@ class NotificationService(
 
         self._history_compare_cache[cache_key] = history_by_code
         return {"history_by_code": history_by_code}
-
-    @staticmethod
-    def _build_data_source_summary_lines(results: List[Any]) -> List[str]:
-        """
-        Build data source and search engine summary lines from AnalysisResult
-        diagnostic_context_snapshot, for display in notification reports.
-
-        Merges provider_runs from ALL results to capture the complete picture
-        across all stocks analysed in a batch.
-        """
-        lines: List[str] = []
-
-        # Merge provider_runs from ALL results (each stock may have different runs).
-        # Data-source runs are taken from the first result only (all stocks share the same
-        # data-source config / fallback chain); news_search runs are merged across all stocks
-        # because different stocks may hit different search providers.
-        all_provider_runs: List[Dict[str, Any]] = []
-        news_search_runs: List[Dict[str, Any]] = []
-        found_any_snapshot = False
-        for result in results or []:
-            snapshot = getattr(result, "diagnostic_context_snapshot", None)
-            if not isinstance(snapshot, dict):
-                continue
-            found_any_snapshot = True
-            diagnostics = snapshot.get("diagnostics", {})
-            if not isinstance(diagnostics, dict):
-                continue
-            runs = diagnostics.get("provider_runs", [])
-            if not isinstance(runs, list):
-                continue
-            # Separate data-source vs news_search runs
-            ds_runs = []
-            for r in runs:
-                if isinstance(r, dict) and str(r.get("data_type", "")).strip() == "news_search":
-                    news_search_runs.append(r)
-                elif isinstance(r, dict):
-                    ds_runs.append(r)
-            # Only keep data-source runs from the first result that has any
-            if not all_provider_runs and ds_runs:
-                all_provider_runs = ds_runs
-
-        if not found_any_snapshot:
-            logger.info(
-                "[data_source_summary] no diagnostic_context_snapshot found in %d results",
-                len(results or []),
-            )
-
-        logger.info(
-            "[data_source_summary] total provider_runs: ds=%d news_search=%d",
-            len(all_provider_runs), len(news_search_runs),
-        )
-
-        # Data source type labels (ordered by importance)
-        data_source_types: List[Tuple[str, str]] = [
-            ("realtime_quote", "实时行情"),
-            ("daily_data", "日线K线"),
-            ("chip", "筹码结构"),
-            ("belong_boards", "所属板块"),
-        ]
-
-        # Separate runs by category
-        data_source_runs_by_type: Dict[str, List[Dict[str, Any]]] = {}
-        search_runs_by_provider: Dict[str, List[Dict[str, Any]]] = {}
-        seen_search_keys: Set[Tuple[str, str]] = set()
-
-        # Process data-source runs (from the first stock only — all stocks share the same
-        # data-source config / fallback chain, so one stock is representative)
-        for run in all_provider_runs:
-            if not isinstance(run, dict):
-                continue
-            data_type = str(run.get("data_type", "")).strip()
-            if data_type in dict(data_source_types):
-                data_source_runs_by_type.setdefault(data_type, []).append(run)
-
-        # Process news_search runs (merged from ALL stocks — different stocks may use
-        # different search providers, so we merge and deduplicate by provider)
-        for run in news_search_runs:
-            if not isinstance(run, dict):
-                continue
-            provider = str(run.get("provider", "unknown")).strip()
-            key = ("news_search", provider)
-            existing = search_runs_by_provider.get(provider, [])
-            if key not in seen_search_keys:
-                seen_search_keys.add(key)
-                search_runs_by_provider.setdefault(provider, []).append(run)
-            else:
-                # Replace if this run is more successful
-                for i, existing_run in enumerate(existing):
-                    if run.get("success") and not existing_run.get("success"):
-                        existing[i] = run
-                        break
-                    elif run.get("success") and existing_run.get("success"):
-                        if (run.get("record_count") or 0) > (existing_run.get("record_count") or 0):
-                            existing[i] = run
-                            break
-
-        # ---------- 【数据源】 section ----------
-        lines.append("### 📡 数据源")
-        lines.append("")
-
-        for data_type, label in data_source_types:
-            runs = data_source_runs_by_type.get(data_type, [])
-            if not runs:
-                lines.append(f"- **{label}**：未配置")
-                continue
-
-            # Build a chain description showing the fallback flow
-            parts: List[str] = []
-            final_success = False
-            final_record_count: Optional[int] = None
-            for run in runs:
-                provider = run.get("provider", "?")
-                success = run.get("success")
-                error_type = run.get("error_type", "")
-                if success is True:
-                    count = run.get("record_count")
-                    count_str = f"({count}条)" if count is not None else ""
-                    parts.append(f"{provider} ✅{count_str}")
-                    final_success = True
-                    final_record_count = count
-                elif success is False and error_type == "skipped":
-                    parts.append(f"{provider} ⏭️")
-                elif success is False and error_type == "unavailable":
-                    parts.append(f"{provider} ⛔")
-                elif success is False:
-                    err_str = f"({error_type})" if error_type else ""
-                    parts.append(f"{provider} ❌{err_str}")
-                else:
-                    parts.append(f"{provider} ❓")
-
-            if final_success:
-                count_str = f"，数据{final_record_count}条" if final_record_count is not None else ""
-                lines.append(f"- **{label}**：{' → '.join(parts)} 已配置{count_str}")
-            else:
-                lines.append(f"- **{label}**：{' → '.join(parts)} 已配置，获取失败")
-
-        lines.append("")
-
-        # ---------- 【搜索引擎】 section ----------
-        lines.append("### 🔍 搜索引擎")
-        lines.append("")
-
-        known_search_providers = [
-            "Bocha", "Tavily", "Anspire", "Brave", "SerpAPI", "MiniMax", "SearXNG",
-        ]
-
-        has_any_search_run = bool(search_runs_by_provider)
-
-        if not has_any_search_run:
-            lines.append("- 未配置搜索引擎")
-        else:
-            for provider in known_search_providers:
-                runs = search_runs_by_provider.get(provider, [])
-                if not runs:
-                    continue
-
-                successes = [r for r in runs if r.get("success") is True]
-                failures = [r for r in runs if r.get("success") is False]
-
-                if successes:
-                    best = successes[-1]
-                    count = best.get("record_count")
-                    count_str = f"，数据{count}条" if count is not None else ""
-                    lines.append(f"- **{provider}**：已配置{count_str}")
-                elif failures:
-                    last = failures[-1]
-                    error = str(last.get("error_message_sanitized", "") or last.get("error_type", "未知错误"))
-                    if len(error) > 200:
-                        error = error[:197] + "..."
-                    lines.append(f"- **{provider}**：已配置，获取失败({error})")
-
-        lines.append("")
-        return lines
 
     def generate_aggregate_report(
         self,
@@ -1229,10 +1056,6 @@ class NotificationService(
                 },
             )
             if out:
-                # Append data source / search engine summary at the end
-                ds_lines = self._build_data_source_summary_lines(results)
-                if ds_lines:
-                    out = out.rstrip("\n") + "\n\n" + "\n".join(ds_lines)
                 return out
 
         if report_date is None:
@@ -1503,8 +1326,6 @@ class NotificationService(
                 ])
         
         # 底部（去除免责声明）
-        # ========== 数据源与搜索引擎状态 ==========
-        report_lines.extend(self._build_data_source_summary_lines(results))
         report_lines.extend([
             "",
             f"*{labels['generated_at_label']}：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}*",
@@ -1540,10 +1361,6 @@ class NotificationService(
                 extra_context={"report_language": report_language},
             )
             if out:
-                # Append data source / search engine summary at the end
-                ds_lines = self._build_data_source_summary_lines(results)
-                if ds_lines:
-                    out = out.rstrip("\n") + "\n\n" + "\n".join(ds_lines)
                 return out
 
         report_date = datetime.now().strftime('%Y-%m-%d')
@@ -1674,9 +1491,6 @@ class NotificationService(
                 lines.append("---")
                 lines.append("")
         
-        # ========== 数据源与搜索引擎状态 ==========
-        lines.extend(self._build_data_source_summary_lines(results))
-
         # 底部
         lines.append(f"*{labels['report_time_label']}: {datetime.now().strftime('%H:%M')}*")
         models = self._collect_models_used(results)
@@ -1792,10 +1606,6 @@ class NotificationService(
                 extra_context={"report_language": report_language},
             )
             if out:
-                # Append data source / search engine summary at the end
-                ds_lines = self._build_data_source_summary_lines(results)
-                if ds_lines:
-                    out = out.rstrip("\n") + "\n\n" + "\n".join(ds_lines)
                 return out
         # Fallback: brief summary from dashboard report
         if not results:
@@ -1810,7 +1620,6 @@ class NotificationService(
             f"> {len(results)} {labels['stock_unit_compact']} | 🟢{buy_count} 🟡{hold_count} 🔴{sell_count}",
         ]
         self._append_market_status_line(lines, results, report_language)
-
         for r in sorted_results:
             _, emoji, _ = self._get_signal_level(r)
             name = self._get_display_name(r, report_language)
@@ -1823,10 +1632,6 @@ class NotificationService(
                 f"{labels['score_label']} {r.sentiment_score} | {one}"
             )
         lines.append("")
-
-        # ========== 数据源与搜索引擎状态 ==========
-        lines.extend(self._build_data_source_summary_lines(results))
-
         lines.append(f"*{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}*")
         models = self._collect_models_used(results)
         if models:
@@ -1948,9 +1753,6 @@ class NotificationService(
 
         # 财务摘要 / 股东回报 / 关联板块（数据缺失时自动隐藏对应小节）
         self._append_fundamental_blocks(lines, result)
-
-        # ========== 数据源与搜索引擎状态 ==========
-        lines.extend(self._build_data_source_summary_lines([result]))
 
         lines.append("---")
         if self._should_show_llm_model():
