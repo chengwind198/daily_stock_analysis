@@ -321,6 +321,7 @@ def _build_visible_history_state(
             getattr(response, "usage", {}) or {},
             getattr(response, "model", "") or get_effective_agent_primary_model(config) or "unknown",
             call_type="agent",
+            stock_code="__conversation__",  # 对话摘要压缩的 LLM 调用
         )
         messages = [build_summary_message(summary_text)] + _to_chat_messages(protected_tail, include_ids=True)
         return VisibleHistoryState(

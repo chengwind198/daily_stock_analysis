@@ -509,6 +509,8 @@ class AgentExecutor:
         Returns:
             AgentResult with parsed dashboard or error.
         """
+        from src.agent.stock_scope import StockScope
+        
         # Build system prompt with skills
         skills_section = ""
         if self.skill_instructions:
@@ -542,7 +544,16 @@ class AgentExecutor:
             {"role": "user", "content": self._build_user_message(task, context)},
         ]
 
-        return self._run_loop(messages, tool_decls, parse_dashboard=True)
+        # Build stock_scope from context to enable proper stock_code tracking in LLM usage
+        stock_scope = None
+        if stock_code:
+            stock_scope = StockScope(
+                expected_stock_code=stock_code,
+                allowed_stock_codes={stock_code},
+                mode="maintain",
+            )
+
+        return self._run_loop(messages, tool_decls, parse_dashboard=True, stock_scope=stock_scope)
 
     def chat(self, message: str, session_id: str, progress_callback: Optional[Callable] = None, context: Optional[Dict[str, Any]] = None) -> AgentResult:
         """Execute the agent loop for a free-form chat message.

@@ -522,7 +522,13 @@ def run_agent_loop(
             models_used.append(m)
         model_for_usage = m or response.provider
         if model_for_usage and model_for_usage != "error" and response.usage:
-            _persist_usage(response.usage, model_for_usage, call_type="agent")
+            # Agent 循环的 LLM 调用，优先使用实际的股票代码
+            # 如果 stock_scope 中有 expected_stock_code，则使用它
+            # 否则使用 '__agent__' 标记（通用 Agent 调用）
+            agent_stock_code = "__agent__"
+            if stock_scope and stock_scope.expected_stock_code:
+                agent_stock_code = stock_scope.expected_stock_code
+            _persist_usage(response.usage, model_for_usage, call_type="agent", stock_code=agent_stock_code)
 
         remaining_timeout = _remaining_timeout_seconds(start_time, max_wall_clock_seconds)
         if remaining_timeout is not None and remaining_timeout <= 0:
